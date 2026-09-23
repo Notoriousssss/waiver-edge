@@ -1,0 +1,41 @@
+{
+  "season": 2026,
+  "max_rostered_pct": 60,
+  "lookback_weeks": 3,
+  "weights": {
+    "wr": {
+      "snap": 20,
+      "route": 15,
+      "target": 25,
+      "air": 10,
+      "red_zone": 15,
+      "trend": 10,
+      "production": 5
+    },
+    "rb": {
+      "snap": 20,
+      "route": 10,
+      "carry": 20,
+      "target": 10,
+      "red_zone": 20,
+      "trend": 15,
+      "production": 5
+    },
+    "te": {
+      "snap": 15,
+      "route": 25,
+      "target": 25,
+      "air": 5,
+      "red_zone": 20,
+      "trend": 5,
+      "production": 5
+    },
+    "qb": {
+      "snap": 20,
+      "rush": 15,
+      "red_zone": 20,
+      "trend": 20,
+      "production": 25
+    }
+  }
+}
