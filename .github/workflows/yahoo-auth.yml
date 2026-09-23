@@ -1,18 +1,18 @@
-name: Yahoo League Finder
+name: Yahoo Fresh Authorization Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  find-leagues:
+  test-yahoo:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Find Yahoo Fantasy leagues
+      - name: Exchange code and test Fantasy access
         env:
           YAHOO_CLIENT_ID: ${{ secrets.YAHOO_CLIENT_ID }}
           YAHOO_CLIENT_SECRET: ${{ secrets.YAHOO_CLIENT_SECRET }}
-          YAHOO_REFRESH_TOKEN: ${{ secrets.YAHOO_REFRESH_TOKEN }}
+          YAHOO_AUTH_CODE: ${{ secrets.YAHOO_AUTH_CODE }}
 
         run: |
           python - <<'PY'
@@ -25,7 +25,7 @@ jobs:
 
           client_id = os.environ["YAHOO_CLIENT_ID"]
           client_secret = os.environ["YAHOO_CLIENT_SECRET"]
-          refresh_token = os.environ["YAHOO_REFRESH_TOKEN"]
+          auth_code = os.environ["YAHOO_AUTH_CODE"]
 
           redirect_uri = "https://notoriousssss.github.io/waiver-edge/"
           token_url = "https://api.login.yahoo.com/oauth2/get_token"
@@ -34,21 +34,22 @@ jobs:
               f"{client_id}:{client_secret}".encode()
           ).decode()
 
-          headers = {
+          token_headers = {
               "Authorization": f"Basic {credentials}",
               "Content-Type": "application/x-www-form-urlencoded",
           }
 
+          # STEP 1 — Exchange the NEW authorization code
           data = urllib.parse.urlencode({
-              "grant_type": "refresh_token",
+              "grant_type": "authorization_code",
               "redirect_uri": redirect_uri,
-              "refresh_token": refresh_token,
+              "code": auth_code,
           }).encode()
 
           request = urllib.request.Request(
               token_url,
               data=data,
-              headers=headers,
+              headers=token_headers,
               method="POST",
           )
 
@@ -58,40 +59,33 @@ jobs:
 
           except urllib.error.HTTPError as e:
               body = e.read().decode("utf-8", errors="replace")
-              print("TOKEN REFRESH FAILED")
-
-              try:
-                  error = json.loads(body)
-                  print("Yahoo error:", error.get("error"))
-                  print(
-                      "Yahoo description:",
-                      error.get("error_description")
-                  )
-              except Exception:
-                  print("Yahoo HTTP status:", e.code)
-
+              print("AUTHORIZATION CODE EXCHANGE FAILED")
+              print("HTTP status:", e.code)
+              print(body)
               raise
 
           access_token = token["access_token"]
+          refresh_token = token.get("refresh_token")
 
-          print("Yahoo OAuth: SUCCESS")
+          print(f"::add-mask::{access_token}")
 
-          # Important:
-          # Yahoo may rotate refresh tokens.
-          new_refresh = token.get("refresh_token")
+          if refresh_token:
+              print(f"::add-mask::{refresh_token}")
 
-          if new_refresh:
-              print(f"::add-mask::{new_refresh}")
+          print("Authorization code exchange: SUCCESS")
+          print("Refresh token received:", "YES" if refresh_token else "NO")
 
-          url = (
+          # STEP 2 — Test Fantasy API using THIS access token
+          # before refreshing anything.
+          fantasy_url = (
               "https://fantasysports.yahooapis.com/"
               "fantasy/v2/users;use_login=1/"
               "games;game_codes=nfl/leagues"
               "?format=json"
           )
 
-          request = urllib.request.Request(
-              url,
+          fantasy_request = urllib.request.Request(
+              fantasy_url,
               headers={
                   "Authorization": f"Bearer {access_token}",
                   "Accept": "application/json",
@@ -99,20 +93,20 @@ jobs:
           )
 
           try:
-              with urllib.request.urlopen(request) as response:
+              with urllib.request.urlopen(fantasy_request) as response:
                   result = json.loads(response.read())
 
           except urllib.error.HTTPError as e:
               body = e.read().decode("utf-8", errors="replace")
-              
-              print("FANTASY API FAILED")
-              print("Yahoo HTTP status:", e.code)
-              print("Yahoo Fantasy response:")
-              print(body)
 
+              print()
+              print("FANTASY API TEST: FAILED")
+              print("Yahoo HTTP status:", e.code)
+              print("Yahoo response:")
+              print(body)
               raise
 
-          print("Yahoo Fantasy API: SUCCESS")
+          print("Fantasy API test: SUCCESS")
           print()
           print("========== YOUR YAHOO NFL LEAGUES ==========")
 
@@ -142,8 +136,21 @@ jobs:
           print("============================================")
           print("Total NFL leagues found:", len(found))
 
-          if not found:
+          # STEP 3 — Save refresh token ONLY after Fantasy works.
+          if not refresh_token:
               raise RuntimeError(
-                  "Yahoo connected successfully, but no NFL leagues were found."
+                  "No refresh token was returned by Yahoo."
               )
+
+          with open("yahoo_refresh_token.txt", "w") as f:
+              f.write(refresh_token)
+
+          print("Working refresh token saved.")
           PY
+
+      - name: Upload working refresh token
+        uses: actions/upload-artifact@v4
+        with:
+          name: yahoo-working-refresh-token
+          path: yahoo_refresh_token.txt
+          retention-days: 1
