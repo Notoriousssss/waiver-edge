@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Waiver Edge — NFL Opportunity Dashboard</title>
+<style>
+:root{--bg:#0b1020;--panel:#121a2d;--line:#25314d;--text:#edf2ff;--muted:#93a4c5;--accent:#6ee7b7;--warn:#fbbf24}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#0b1020,#0e1528);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:1250px;margin:auto;padding:28px 18px}.hero{display:flex;justify-content:space-between;gap:20px;align-items:end;margin-bottom:22px}.eyebrow{color:var(--accent);font-weight:800;letter-spacing:.12em;text-transform:uppercase;font-size:12px}.h1{font-size:34px;font-weight:900;margin:5px 0}.sub{color:var(--muted);max-width:760px}
+.panel{background:rgba(18,26,45,.92);border:1px solid var(--line);border-radius:16px;padding:16px;margin:14px 0;box-shadow:0 10px 30px #0002}
+.controls{display:flex;flex-wrap:wrap;gap:10px}.control{background:#0d1527;border:1px solid var(--line);border-radius:10px;padding:9px 11px;color:var(--text)}
+input,select{background:#0d1527;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.card{background:#0d1527;border:1px solid var(--line);border-radius:12px;padding:13px}.num{font-size:24px;font-weight:900}.muted{color:var(--muted)}
+.tablewrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:1050px}th,td{padding:11px 9px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;cursor:pointer}
+.score{font-size:20px;font-weight:900}.tier{font-weight:800}.padd{color:var(--accent)}.watch{color:var(--warn)}.sig{display:inline-block;background:#1a2742;border-radius:999px;padding:3px 7px;margin:2px;color:#cbd7ef;font-size:11px}
+.small{font-size:12px}.footer{color:var(--muted);font-size:12px;margin-top:18px}
+@media(max-width:800px){.cards{grid-template-columns:repeat(2,1fr)}.h1{font-size:27px}.hero{display:block}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <div>
+      <div class="eyebrow">12-Team Half-PPR • Opportunity Model</div>
+      <div class="h1">Waiver Edge</div>
+      <div class="sub">Find players whose <b>role is improving</b> before the fantasy box score fully catches up. Rankings emphasize snaps, routes, target/carry share, air yards, red-zone opportunity and recent trend.</div>
+    </div>
+    <div class="small muted" id="updated">Loading…</div>
+  </div>
+
+  <div class="panel">
+    <div class="controls">
+      <label class="control">Position
+        <select id="pos"><option value="ALL">All</option><option>RB</option><option>WR</option><option>TE</option><option>QB</option></select>
+      </label>
+      <label class="control">Min score <input id="min" type="number" value="45" min="0" max="100" style="width:65px"></label>
+      <label class="control">Search <input id="search" placeholder="Player / team"></label>
+      <label class="control">Max rostered % <input id="own" type="number" value="60" min="0" max="100" style="width:65px"></label>
+      <label class="control"><input id="signals" type="checkbox"> Only players with a strong usage signal</label>
+    </div>
+  </div>
+
+  <div class="cards">
+    <div class="card"><div class="muted">Data through</div><div class="num" id="week">—</div></div>
+    <div class="card"><div class="muted">Players tracked</div><div class="num" id="count">—</div></div>
+    <div class="card"><div class="muted">Priority Adds</div><div class="num" id="priority">—</div></div>
+    <div class="card"><div class="muted">Model</div><div class="num">Usage+</div></div>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0">Waiver Watchlist</h2>
+    <div class="muted small">Sort any column. The score is a model signal, not a guarantee of future production.</div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th data-k="rank">Rank</th><th data-k="player">Player</th><th data-k="team">Team</th><th data-k="pos">Pos</th>
+          <th data-k="breakout_score">Score</th><th data-k="tier">Tier</th><th data-k="snap">Snap %</th>
+          <th data-k="route">Route %</th><th data-k="target">Target %</th><th data-k="carry">Carry %</th>
+          <th data-k="air">Air %</th><th data-k="rz">RZ Looks</th><th>Signals</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3 style="margin-top:0">How to use it</h3>
+    <div class="muted">For WR/TE, prioritize players whose routes and target share are high or rising. For RB, prioritize snap/carry share plus receiving and red-zone work. Treat one-game spikes carefully; the model uses a rolling three-week window with the most recent week weighted most heavily.</div>
+  </div>
+  <div class="footer">Data is updated by GitHub Actions. nflverse data is maintained by the nflverse project. This dashboard is an analytics tool and does not guarantee player performance.</div>
+</div>
+
+<script>
+let DATA=[], sortKey="breakout_score", desc=true;
+const $=id=>document.getElementById(id);
+function fmt(x){return (Number(x)||0).toFixed(1)}
+function render(){
+  const pos=$("pos").value, min=Number($("min").value)||0, q=$("search").value.toLowerCase(), sig=$("signals").checked;
+  let rows=DATA.filter(p=>(pos==="ALL"||p.pos===pos)&&p.breakout_score>=min&&((p.player+" "+p.team).toLowerCase().includes(q)));
+  if(sig) rows=rows.filter(p=>p.signals&&p.signals.length);
+  rows.sort((a,b)=>{
+    let av=a[sortKey], bv=b[sortKey];
+    if(sortKey==="player"||sortKey==="team"||sortKey==="pos"||sortKey==="tier"){av=String(av);bv=String(bv);return desc?bv.localeCompare(av):av.localeCompare(bv)}
+    return desc?(Number(bv)||0)-(Number(av)||0):(Number(av)||0)-(Number(bv)||0);
+  });
+  $("rows").innerHTML=rows.slice(0,150).map((p,i)=>`<tr>
+    <td>${i+1}</td><td><b>${p.player}</b></td><td>${p.team}</td><td>${p.pos}</td>
+    <td class="score">${fmt(p.breakout_score)}</td><td class="tier ${p.breakout_score>=68?'padd':''}">${p.tier}</td>
+    <td>${fmt(p.snap)}%</td><td>${fmt(p.route)}%</td><td>${fmt(p.target)}%</td><td>${fmt(p.carry)}%</td>
+    <td>${fmt(p.air)}%</td><td>${fmt(p.rz)}</td>
+    <td>${(p.signals||[]).map(s=>`<span class="sig">${s}</span>`).join("")}</td>
+  </tr>`).join("");
+  $("count").textContent=rows.length;
+  $("priority").textContent=rows.filter(p=>p.breakout_score>=78).length;
+}
+async function init(){
+  const d=await fetch("data.json?"+Date.now()).then(r=>r.json());
+  DATA=d.players||[];$("week").textContent="W"+d.through_week;
+  $("updated").textContent="Updated "+new Date(d.generated_at_utc).toLocaleString();
+  render();
+}
+["pos","min","search","own","signals"].forEach(id=>$(id).addEventListener("input",render));
+document.querySelectorAll("th[data-k]").forEach(th=>th.addEventListener("click",()=>{
+  const k=th.dataset.k;if(sortKey===k)desc=!desc;else{sortKey=k;desc=true}render();
+}));
+init().catch(e=>{$("updated").textContent="Data unavailable — run the updater first.";console.error(e)});
+</script>
+</body>
+</html>
