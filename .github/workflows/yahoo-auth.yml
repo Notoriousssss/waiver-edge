@@ -1,18 +1,18 @@
-name: Yahoo Token Setup
+name: Yahoo League Finder
 
 on:
   workflow_dispatch:
 
 jobs:
-  yahoo-token:
+  find-leagues:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Exchange and verify Yahoo token
+      - name: Find Yahoo Fantasy leagues
         env:
           YAHOO_CLIENT_ID: ${{ secrets.YAHOO_CLIENT_ID }}
           YAHOO_CLIENT_SECRET: ${{ secrets.YAHOO_CLIENT_SECRET }}
-          YAHOO_AUTH_CODE: ${{ secrets.YAHOO_AUTH_CODE }}
+          YAHOO_REFRESH_TOKEN: ${{ secrets.YAHOO_REFRESH_TOKEN }}
 
         run: |
           python - <<'PY'
@@ -25,12 +25,11 @@ jobs:
 
           client_id = os.environ["YAHOO_CLIENT_ID"]
           client_secret = os.environ["YAHOO_CLIENT_SECRET"]
-          auth_code = os.environ["YAHOO_AUTH_CODE"]
+          refresh_token = os.environ["YAHOO_REFRESH_TOKEN"]
 
           redirect_uri = "https://notoriousssss.github.io/waiver-edge/"
           token_url = "https://api.login.yahoo.com/oauth2/get_token"
 
-          # Yahoo's documented confidential-client authentication.
           credentials = base64.b64encode(
               f"{client_id}:{client_secret}".encode()
           ).decode()
@@ -40,11 +39,10 @@ jobs:
               "Content-Type": "application/x-www-form-urlencoded",
           }
 
-          # STEP 1: Exchange authorization code.
           data = urllib.parse.urlencode({
-              "grant_type": "authorization_code",
+              "grant_type": "refresh_token",
               "redirect_uri": redirect_uri,
-              "code": auth_code,
+              "refresh_token": refresh_token,
           }).encode()
 
           request = urllib.request.Request(
@@ -60,7 +58,7 @@ jobs:
 
           except urllib.error.HTTPError as e:
               body = e.read().decode("utf-8", errors="replace")
-              print("AUTH CODE EXCHANGE FAILED")
+              print("TOKEN REFRESH FAILED")
 
               try:
                   error = json.loads(body)
@@ -74,71 +72,73 @@ jobs:
 
               raise
 
-          refresh_token = token.get("refresh_token")
+          access_token = token["access_token"]
 
-          if not refresh_token:
-              raise RuntimeError("Yahoo did not return a refresh token.")
+          print("Yahoo OAuth: SUCCESS")
 
-          print("Authorization code exchange: SUCCESS")
-          print("Refresh token received: YES")
+          # Important:
+          # Yahoo may rotate refresh tokens.
+          new_refresh = token.get("refresh_token")
 
-          # Mask the token before doing anything else.
-          print(f"::add-mask::{refresh_token}")
+          if new_refresh:
+              print(f"::add-mask::{new_refresh}")
 
-          # STEP 2: Immediately verify that refresh token.
-          refresh_data = urllib.parse.urlencode({
-              "grant_type": "refresh_token",
-              "redirect_uri": redirect_uri,
-              "refresh_token": refresh_token,
-          }).encode()
+          url = (
+              "https://fantasysports.yahooapis.com/"
+              "fantasy/v2/users;use_login=1/"
+              "games;game_codes=nfl/leagues"
+              "?format=json"
+          )
 
-          refresh_request = urllib.request.Request(
-              token_url,
-              data=refresh_data,
-              headers=headers,
-              method="POST",
+          request = urllib.request.Request(
+              url,
+              headers={
+                  "Authorization": f"Bearer {access_token}",
+                  "Accept": "application/json",
+              },
           )
 
           try:
-              with urllib.request.urlopen(refresh_request) as response:
-                  refreshed = json.loads(response.read())
+              with urllib.request.urlopen(request) as response:
+                  result = json.loads(response.read())
 
           except urllib.error.HTTPError as e:
-              body = e.read().decode("utf-8", errors="replace")
-              print("REFRESH TOKEN TEST FAILED")
-
-              try:
-                  error = json.loads(body)
-                  print("Yahoo error:", error.get("error"))
-                  print(
-                      "Yahoo description:",
-                      error.get("error_description")
-                  )
-              except Exception:
-                  print("Yahoo HTTP status:", e.code)
-
+              print("FANTASY API FAILED")
+              print("Yahoo HTTP status:", e.code)
               raise
 
-          print("Refresh token verification: SUCCESS")
-          print("Fresh access token received: YES")
+          print("Yahoo Fantasy API: SUCCESS")
+          print()
+          print("========== YOUR YAHOO NFL LEAGUES ==========")
 
-          # Yahoo can rotate refresh tokens.
-          final_refresh = refreshed.get(
-              "refresh_token",
-              refresh_token
-          )
+          found = set()
 
-          print(f"::add-mask::{final_refresh}")
+          def walk(obj):
+              if isinstance(obj, dict):
+                  if "league_key" in obj and "name" in obj:
+                      key = str(obj["league_key"])
+                      name = str(obj["name"])
 
-          with open("yahoo_refresh_token.txt", "w") as f:
-              f.write(final_refresh)
+                      if key not in found:
+                          found.add(key)
+                          print(
+                              f"LEAGUE: {name} | KEY: {key}"
+                          )
 
-          print("Verified refresh token saved for download.")
+                  for value in obj.values():
+                      walk(value)
+
+              elif isinstance(obj, list):
+                  for value in obj:
+                      walk(value)
+
+          walk(result)
+
+          print("============================================")
+          print("Total NFL leagues found:", len(found))
+
+          if not found:
+              raise RuntimeError(
+                  "Yahoo connected successfully, but no NFL leagues were found."
+              )
           PY
-
-      - name: Upload verified refresh token
-        uses: actions/upload-artifact@v4
-        with:
-          name: yahoo-verified-refresh-token
-          path: yahoo_refresh_token.txt
-          retention-days: 1
