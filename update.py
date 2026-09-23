@@ -66,30 +66,57 @@ w["air_share"]=div(w.air_yards,g.air_yards.transform("sum"))
 
 print("Loading snap counts...")
 w["snap_share"]=0.0
+
 try:
- s=pdx(nfl.load_snap_counts(SEASON))
- print("SNAP COLUMNS:", list(s.columns))
- print("SNAP SAMPLE:")
- print(s.head(3).to_string())
- sr={}
- for target,opts in {"player_id":["player_id","pfr_player_id"],"player_name":["player","player_name"],"team":["team"],"week":["week"]}.items():
-    if target not in s:
-     for x in opts:
-      if x in s: sr[x]=target; break
- s=s.rename(columns=sr)
- sp=next((x for x in ["offense_pct","off_pct","offensive_snap_pct","offense_snap_pct"] if x in s),None)
- if sp:
-  s["snap_new"]=normpct(s[sp])
-  keys=[]
-  if "player_id" in s:
-   overlap=set(w.player_id.dropna().astype(str))&set(s.player_id.dropna().astype(str))
-   if overlap:keys=["player_id","week"]
-  if not keys and all(x in s for x in ["player_name","team","week"]):keys=["player_name","team","week"]
-  if keys:
-   sm=s[keys+["snap_new"]].drop_duplicates(keys)
-   w=w.merge(sm,on=keys,how="left")
-   w["snap_share"]=n(w.snap_new); w=w.drop(columns=["snap_new"])
-except Exception as e: print("Snap warning:",e)
+    # Snap counts use Pro Football Reference IDs.
+    snaps=pdx(nfl.load_snap_counts(SEASON))
+    
+    # nflverse player database maps PFR IDs to GSIS IDs.
+    ids=pdx(nfl.load_players())
+
+    # Find the correct ID columns.
+    gsis_col=next((x for x in ["gsis_id","player_id"] if x in ids.columns),None)
+    pfr_col=next((x for x in ["pfr_id","pfr_player_id"] if x in ids.columns),None)
+
+    if not gsis_col or not pfr_col:
+        raise RuntimeError(
+            f"Could not find GSIS/PFR mapping columns. Player columns: {list(ids.columns)}"
+        )
+
+    # Create PFR -> GSIS mapping.
+    idmap=ids[[gsis_col,pfr_col]].dropna().drop_duplicates()
+    idmap=idmap.rename(columns={
+        gsis_col:"player_id",
+        pfr_col:"pfr_player_id"
+    })
+
+    # Snap feed already confirmed these columns:
+    # pfr_player_id, week, offense_pct
+    snaps=snaps.merge(idmap,on="pfr_player_id",how="left")
+
+    snaps["week"]=pd.to_numeric(snaps["week"],errors="coerce")
+    snaps["snap_new"]=normpct(snaps["offense_pct"])
+
+    sm=snaps[
+        ["player_id","week","snap_new"]
+    ].dropna(subset=["player_id"]).drop_duplicates(
+        ["player_id","week"]
+    )
+
+    w=w.merge(
+        sm,
+        on=["player_id","week"],
+        how="left"
+    )
+
+    w["snap_share"]=n(w["snap_new"])
+    w=w.drop(columns=["snap_new"])
+
+    matched=(w["snap_share"]>0).sum()
+    print(f"Matched snap counts for {matched} player-week rows.")
+
+except Exception as e:
+    print("Snap warning:",e)
 
 print("Loading play-by-play for red-zone work...")
 w["rz_looks"]=0.0
