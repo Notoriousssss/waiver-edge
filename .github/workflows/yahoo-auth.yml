@@ -13,6 +13,7 @@ jobs:
           YAHOO_CLIENT_ID: ${{ secrets.YAHOO_CLIENT_ID }}
           YAHOO_CLIENT_SECRET: ${{ secrets.YAHOO_CLIENT_SECRET }}
           YAHOO_REFRESH_TOKEN: ${{ secrets.YAHOO_REFRESH_TOKEN }}
+
         run: |
           python - <<'PY'
           import os
@@ -20,18 +21,24 @@ jobs:
           import urllib.parse
           import urllib.request
 
-          # Get a fresh access token using our stored refresh token.
+          # ---------------------------------
+          # 1. Get fresh Yahoo access token
+          # ---------------------------------
+
           data = urllib.parse.urlencode({
-    "client_id": os.environ["YAHOO_CLIENT_ID"],
-    "client_secret": os.environ["YAHOO_CLIENT_SECRET"],
-    "refresh_token": os.environ["YAHOO_REFRESH_TOKEN"],
-    "redirect_uri": "https://notoriousssss.github.io/waiver-edge/",
-    "grant_type": "refresh_token",
+              "client_id": os.environ["YAHOO_CLIENT_ID"],
+              "client_secret": os.environ["YAHOO_CLIENT_SECRET"],
+              "refresh_token": os.environ["YAHOO_REFRESH_TOKEN"],
+              "redirect_uri": "https://notoriousssss.github.io/waiver-edge/",
+              "grant_type": "refresh_token",
+          }).encode()
 
           req = urllib.request.Request(
               "https://api.login.yahoo.com/oauth2/get_token",
               data=data,
-              headers={"Content-Type": "application/x-www-form-urlencoded"},
+              headers={
+                  "Content-Type": "application/x-www-form-urlencoded"
+              },
               method="POST",
           )
 
@@ -42,10 +49,14 @@ jobs:
 
           print("Yahoo OAuth: SUCCESS")
 
-          # Ask Yahoo for the logged-in user's NFL leagues.
+          # ---------------------------------
+          # 2. Get user's NFL fantasy leagues
+          # ---------------------------------
+
           url = (
               "https://fantasysports.yahooapis.com/"
-              "fantasy/v2/users;use_login=1/games;game_codes=nfl/leagues"
+              "fantasy/v2/users;use_login=1/"
+              "games;game_codes=nfl/leagues"
               "?format=json"
           )
 
@@ -64,10 +75,13 @@ jobs:
           print()
           print("----- YAHOO LEAGUES -----")
 
-          users = result["fantasy_content"]["users"]
+          # ---------------------------------
+          # 3. Find league names + league keys
+          # ---------------------------------
 
           def walk(obj):
               if isinstance(obj, dict):
+
                   if "league_key" in obj and "name" in obj:
                       print(
                           "League:",
@@ -83,7 +97,8 @@ jobs:
                   for value in obj:
                       walk(value)
 
-          walk(users)
+          walk(result)
 
           print("-------------------------")
+
           PY
