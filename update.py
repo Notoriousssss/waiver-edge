@@ -68,6 +68,9 @@ print("Loading snap counts...")
 w["snap_share"]=0.0
 try:
  s=pdx(nfl.load_snap_counts(SEASON))
+    print("SNAP COLUMNS:", list(s.columns))
+print("SNAP SAMPLE:")
+print(s.head(3).to_string())
  sr={}
  for target,opts in {"player_id":["player_id","pfr_player_id"],"player_name":["player","player_name"],"team":["team"],"week":["week"]}.items():
     if target not in s:
