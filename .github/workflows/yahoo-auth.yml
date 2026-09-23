@@ -1,0 +1,68 @@
+name: Yahoo Authorization
+
+on:
+  workflow_dispatch:
+
+jobs:
+  authorize:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Exchange Yahoo authorization code
+        env:
+          YAHOO_CLIENT_ID: ${{ secrets.YAHOO_CLIENT_ID }}
+          YAHOO_CLIENT_SECRET: ${{ secrets.YAHOO_CLIENT_SECRET }}
+          YAHOO_AUTH_CODE: ${{ secrets.YAHOO_AUTH_CODE }}
+        run: |
+          python - <<'PY'
+          import os
+          import urllib.parse
+          import urllib.request
+          import json
+
+          data = urllib.parse.urlencode({
+              "client_id": os.environ["YAHOO_CLIENT_ID"],
+              "client_secret": os.environ["YAHOO_CLIENT_SECRET"],
+              "redirect_uri": "https://notoriousssss.github.io/waiver-edge/",
+              "code": os.environ["YAHOO_AUTH_CODE"],
+              "grant_type": "authorization_code"
+          }).encode()
+
+          req = urllib.request.Request(
+              "https://api.login.yahoo.com/oauth2/get_token",
+              data=data,
+              headers={"Content-Type": "application/x-www-form-urlencoded"},
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(req) as response:
+                  result = json.loads(response.read())
+
+              refresh = result.get("refresh_token")
+
+              if not refresh:
+                  raise RuntimeError("Yahoo did not return a refresh token.")
+
+              print("SUCCESS: Yahoo authorization completed.")
+              print("A refresh token was returned.")
+              print("Token length:", len(refresh))
+
+              # Mask it so GitHub will not accidentally expose it later.
+              print(f"::add-mask::{refresh}")
+
+              # Save token as an artifact file for this one-time setup.
+              with open("yahoo_refresh_token.txt", "w") as f:
+                  f.write(refresh)
+
+          except Exception as e:
+              print("Yahoo authorization failed:", type(e).__name__)
+              raise
+          PY
+
+      - name: Upload refresh token
+        uses: actions/upload-artifact@v4
+        with:
+          name: yahoo-refresh-token
+          path: yahoo_refresh_token.txt
+          retention-days: 1
