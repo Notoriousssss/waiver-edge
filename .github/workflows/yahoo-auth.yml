@@ -20,6 +20,7 @@ jobs:
           import json
           import urllib.parse
           import urllib.request
+          import urllib.error
 
           # ---------------------------------
           # 1. Get fresh Yahoo access token
@@ -42,8 +43,21 @@ jobs:
               method="POST",
           )
 
-          with urllib.request.urlopen(req) as response:
-              token = json.loads(response.read())
+          try:
+    with urllib.request.urlopen(req) as response:
+        token = json.loads(response.read())
+
+except urllib.error.HTTPError as e:
+    body = e.read().decode("utf-8", errors="replace")
+
+    try:
+        err = json.loads(body)
+        print("Yahoo error:", err.get("error"))
+        print("Yahoo description:", err.get("error_description"))
+    except Exception:
+        print("Yahoo returned HTTP:", e.code)
+
+    raise
 
           access_token = token["access_token"]
 
