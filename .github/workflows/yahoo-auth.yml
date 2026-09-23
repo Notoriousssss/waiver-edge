@@ -22,11 +22,11 @@ jobs:
 
           # Get a fresh access token using our stored refresh token.
           data = urllib.parse.urlencode({
-              "client_id": os.environ["YAHOO_CLIENT_ID"],
-              "client_secret": os.environ["YAHOO_CLIENT_SECRET"],
-              "refresh_token": os.environ["YAHOO_REFRESH_TOKEN"],
-              "grant_type": "refresh_token",
-          }).encode()
+    "client_id": os.environ["YAHOO_CLIENT_ID"],
+    "client_secret": os.environ["YAHOO_CLIENT_SECRET"],
+    "refresh_token": os.environ["YAHOO_REFRESH_TOKEN"],
+    "redirect_uri": "https://notoriousssss.github.io/waiver-edge/",
+    "grant_type": "refresh_token",
 
           req = urllib.request.Request(
               "https://api.login.yahoo.com/oauth2/get_token",
