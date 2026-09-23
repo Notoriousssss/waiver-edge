@@ -1,165 +1,93 @@
-# Waiver Edge V2 — replacement update.py
-from pathlib import Path
-from datetime import datetime, timezone
-import json, numpy as np, pandas as pd
-import nflreadpy as nfl
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Waiver Edge</title>
+<style>
+:root{--bg:#081020;--card:#101a30;--line:#263754;--text:#f6f8ff;--muted:#9fc0f7;--accent:#59f2bf;--chip:#182947}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:1500px;margin:auto;padding:18px 28px 40px}.eyebrow{color:var(--accent);font-weight:800;letter-spacing:1.5px}
+h1{font-size:36px;margin:8px 0 4px} .sub{color:var(--muted);max-width:850px}.top{display:flex;justify-content:space-between;gap:20px;align-items:end}
+.updated{color:var(--muted);white-space:nowrap}.panel,.stat{background:var(--card);border:1px solid var(--line);border-radius:18px}
+.controls{display:flex;gap:12px;flex-wrap:wrap;padding:16px;margin-top:20px}.control{border:1px solid var(--line);border-radius:12px;padding:10px 12px;display:flex;gap:9px;align-items:center}
+select,input{background:#0b1528;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0}.stat{padding:16px}.stat small{color:var(--muted);display:block}.stat b{font-size:25px}
+.tablebox{padding:16px;overflow:auto} table{width:100%;border-collapse:collapse;min-width:1000px} th,td{padding:13px 10px;border-bottom:1px solid var(--line);text-align:left}
+th{color:var(--muted);font-size:12px;letter-spacing:.5px;cursor:pointer}td.score{font-size:18px;font-weight:800}.chip{background:var(--chip);padding:5px 8px;border-radius:999px;font-size:11px}
+.note{color:var(--muted);margin:8px 0 16px}.empty{padding:28px;color:var(--muted)}.warn{background:#2b2111;border:1px solid #655025;padding:12px;border-radius:12px;margin-top:14px}
+@media(max-width:800px){.stats{grid-template-columns:1fr 1fr}.top{display:block}.updated{margin-top:8px}.wrap{padding:14px}}
+</style>
+</head>
+<body><main class="wrap">
+<div class="top"><div><div class="eyebrow">12-TEAM HALF-PPR • OPPORTUNITY MODEL</div><h1>Waiver Edge</h1>
+<div class="sub">Find players whose role is improving before the fantasy box score fully catches up. V2.1 focuses the main waiver board on RB, WR and TE opportunity.</div></div>
+<div class="updated" id="updated">Loading…</div></div>
 
-SEASON=2026
-DOCS=Path("docs"); DOCS.mkdir(exist_ok=True)
-POSITIONS={"RB","WR","TE"}
-WEIGHTS={0:.50,1:.30,2:.20}
+<section class="panel controls">
+<label class="control">Position <select id="pos"><option>All</option><option>RB</option><option>WR</option><option>TE</option></select></label>
+<label class="control">Min score <input id="min" type="number" value="45" min="0" max="100" style="width:70px"></label>
+<label class="control">Search <input id="search" placeholder="Player / team"></label>
+<label class="control"><input id="strong" type="checkbox"> Only strong usage signals</label>
+</section>
+<div class="note">Yahoo league availability/rostered status is coming next. The old “Max rostered %” filter has been removed until it uses real Yahoo league data.</div>
 
-def pdx(x): return x.to_pandas() if hasattr(x,"to_pandas") else pd.DataFrame(x)
-def n(s): return pd.to_numeric(s,errors="coerce").fillna(0)
-def c(df,*names,default=0):
-    for x in names:
-        if x in df.columns:return df[x]
-    return pd.Series(default,index=df.index)
-def div(a,b):
-    a,b=n(a),n(b)
-    return pd.Series(np.where(b>0,a/b,0),index=a.index)
-def normpct(s):
-    x=n(s).astype(float)
-    if len(x) and x.max()>1.5:x=x/100
-    return x.clip(0,1)
-def jd(o):
-    if isinstance(o,np.integer):return int(o)
-    if isinstance(o,np.floating):return float(o)
-    if isinstance(o,np.bool_):return bool(o)
-    if isinstance(o,(pd.Timestamp,datetime)):return o.isoformat()
-    if hasattr(o,"item"):return o.item()
-    return str(o)
+<section class="stats">
+<div class="stat"><small>Data through</small><b id="week">—</b></div>
+<div class="stat"><small>Players tracked</small><b id="tracked">—</b></div>
+<div class="stat"><small>Priority Adds</small><b id="priority">—</b></div>
+<div class="stat"><small>Model</small><b id="model">—</b></div>
+</section>
 
-print("Loading weekly player stats...")
-w=pdx(nfl.load_player_stats(SEASON,summary_level="week"))
-rename={}
-for target,opts in {
- "player_id":["player_id","gsis_id"],"player_name":["player_display_name","player_name","name"],
- "team":["recent_team","team","posteam"],"position":["position","position_group"],"week":["week"]
-}.items():
-    if target not in w:
-        for x in opts:
-            if x in w: rename[x]=target; break
-w=w.rename(columns=rename)
-need=["player_id","player_name","team","position","week"]
-miss=[x for x in need if x not in w]
-if miss: raise RuntimeError(f"Missing player-stat columns {miss}; got {list(w.columns)}")
-w["week"]=pd.to_numeric(w["week"],errors="coerce")
-w=w.dropna(subset=["week"]); w["week"]=w["week"].astype(int)
-w["position"]=w["position"].astype(str).str.upper()
-w=w[w.position.isin(POSITIONS)].copy()
-if w.empty: raise RuntimeError("No RB/WR/TE weekly stats found.")
-latest=int(w.week.max()); first=max(1,latest-2)
-w=w[w.week.between(first,latest)].copy()
-
-for out,names in {
- "targets":("targets",),"carries":("carries","rushing_attempts"),"receptions":("receptions",),
- "rec_yards":("receiving_yards",),"rush_yards":("rushing_yards",),
- "rec_tds":("receiving_tds",),"rush_tds":("rushing_tds",),
- "air_yards":("receiving_air_yards","air_yards")
-}.items(): w[out]=n(c(w,*names))
-w["half_ppr"]=w.receptions*.5+(w.rec_yards+w.rush_yards)*.1+(w.rec_tds+w.rush_tds)*6
-g=w.groupby(["team","week"],dropna=False)
-w["target_share"]=div(w.targets,g.targets.transform("sum"))
-w["carry_share"]=div(w.carries,g.carries.transform("sum"))
-w["air_share"]=div(w.air_yards,g.air_yards.transform("sum"))
-
-print("Loading snap counts...")
-w["snap_share"]=0.0
-try:
- s=pdx(nfl.load_snap_counts(SEASON))
- sr={}
- for target,opts in {"player_id":["player_id","pfr_player_id"],"player_name":["player","player_name"],"team":["team"],"week":["week"]}.items():
-    if target not in s:
-     for x in opts:
-      if x in s: sr[x]=target; break
- s=s.rename(columns=sr)
- sp=next((x for x in ["offense_pct","off_pct","offensive_snap_pct","offense_snap_pct"] if x in s),None)
- if sp:
-  s["snap_new"]=normpct(s[sp])
-  keys=[]
-  if "player_id" in s:
-   overlap=set(w.player_id.dropna().astype(str))&set(s.player_id.dropna().astype(str))
-   if overlap:keys=["player_id","week"]
-  if not keys and all(x in s for x in ["player_name","team","week"]):keys=["player_name","team","week"]
-  if keys:
-   sm=s[keys+["snap_new"]].drop_duplicates(keys)
-   w=w.merge(sm,on=keys,how="left")
-   w["snap_share"]=n(w.snap_new); w=w.drop(columns=["snap_new"])
-except Exception as e: print("Snap warning:",e)
-
-print("Loading play-by-play for red-zone work...")
-w["rz_looks"]=0.0
-try:
- p=pdx(nfl.load_pbp(SEASON)); p["week"]=pd.to_numeric(p["week"],errors="coerce")
- p=p[p.week.between(first,latest)].copy()
- p=p[n(c(p,"yardline_100",default=999))<=20]
- parts=[]
- if "rusher_player_id" in p:
-  x=p[p.rusher_player_id.notna()].groupby(["rusher_player_id","week"]).size().reset_index(name="rz_rush").rename(columns={"rusher_player_id":"player_id"}); parts.append(x)
- if "receiver_player_id" in p:
-  x=p[p.receiver_player_id.notna()].groupby(["receiver_player_id","week"]).size().reset_index(name="rz_tgt").rename(columns={"receiver_player_id":"player_id"}); parts.append(x)
- if parts:
-  rz=parts[0]
-  for x in parts[1:]:rz=rz.merge(x,on=["player_id","week"],how="outer")
-  rz["rz_new"]=n(c(rz,"rz_rush"))+n(c(rz,"rz_tgt"))
-  w=w.merge(rz[["player_id","week","rz_new"]],on=["player_id","week"],how="left")
-  w["rz_looks"]=n(w.rz_new); w=w.drop(columns=["rz_new"])
-except Exception as e: print("RZ warning:",e)
-
-# Public nflverse feeds used here do not provide reliable route participation.
-# V2 leaves it blank/zero rather than inventing a proxy.
-w["route_share"]=0.0
-w["ago"]=latest-w.week; w["wt"]=w.ago.map(WEIGHTS).fillna(0)
-metrics=["snap_share","route_share","target_share","carry_share","air_share","rz_looks","half_ppr"]
-
-rows=[]
-for pid,z in w.groupby("player_id",dropna=False):
- z=z.sort_values("week"); den=z.wt.sum() or 1
- r={"player_id":pid,"player":z.player_name.iloc[-1],"team":z.team.iloc[-1],"pos":z.position.iloc[-1]}
- for m in metrics:r[m]=float((z[m]*z.wt).sum()/den)
- a=z.iloc[-1]; b=z.iloc[-2] if len(z)>1 else a
- for m in ["snap_share","target_share","carry_share"]:r[m+"_trend"]=float(a[m]-b[m])
- rows.append(r)
-P=pd.DataFrame(rows)
-
-def pr(x):return x.rank(pct=True,method="average").fillna(0)
-P["score"]=0.0
-for pos in ["RB","WR","TE"]:
- ix=P.pos.eq(pos); q=P.loc[ix]
- if q.empty:continue
- if pos=="RB": sc=22*pr(q.snap_share)+28*pr(q.carry_share)+16*pr(q.target_share)+14*pr(q.rz_looks)+10*pr(q.half_ppr)+10*pr(q.carry_share_trend+q.target_share_trend)
- elif pos=="WR": sc=24*pr(q.snap_share)+28*pr(q.target_share)+20*pr(q.air_share)+10*pr(q.rz_looks)+8*pr(q.half_ppr)+10*pr(q.target_share_trend+q.snap_share_trend)
- else: sc=30*pr(q.snap_share)+30*pr(q.target_share)+15*pr(q.rz_looks)+10*pr(q.half_ppr)+15*pr(q.target_share_trend+q.snap_share_trend)
- P.loc[ix,"score"]=sc.values
-P.score=P.score.clip(0,100).round(1)
-def tier(x):
- return "Priority Add" if x>=82 else "Strong Add" if x>=72 else "Stash" if x>=60 else "Monitor"
-def sig(r):
- a=[]
- if r.snap_share>=.70:a.append("high snap role")
- if r.snap_share_trend>=.10:a.append("snap share rising")
- if r.target_share>=.18:a.append("strong target share")
- if r.target_share_trend>=.05:a.append("targets rising")
- if r.pos=="RB" and r.carry_share>=.45:a.append("major backfield share")
- if r.carry_share_trend>=.10:a.append("carry share rising")
- if r.air_share>=.25:a.append("air-yard role")
- if r.rz_looks>=2:a.append("red-zone role")
- return a[:3] or ["usage needs monitoring"]
-P["tier"]=P.score.map(tier); P["signals"]=P.apply(sig,axis=1)
-P=P[P.score>=35].sort_values(["score","target_share","carry_share"],ascending=False)
-
-out=[]
-for rank,(_,r) in enumerate(P.iterrows(),1):
- out.append({"rank":rank,"player":str(r.player),"team":str(r.team),"pos":str(r.pos),
- "score":float(r.score),"tier":str(r.tier),"snap_pct":round(float(r.snap_share)*100,1),
- "route_pct":round(float(r.route_share)*100,1),"target_pct":round(float(r.target_share)*100,1),
- "carry_pct":round(float(r.carry_share)*100,1),"air_pct":round(float(r.air_share)*100,1),
- "rz_looks":round(float(r.rz_looks),1),"half_ppr":round(float(r.half_ppr),1),
- "signals":r.signals,"rostered_pct":None,"available_leagues":[]})
-
-payload={"season":SEASON,"week":latest,"generated_at_utc":datetime.now(timezone.utc).isoformat(),
-"model":"Usage+ V2.1","players":out,"meta":{"positions":["RB","WR","TE"],"lookback_weeks":3,
-"note":"Yahoo availability not connected yet. Route participation is intentionally not fabricated. Front end: V2.1."}}
-(DOCS/"data.json").write_text(json.dumps(payload,allow_nan=False,indent=2,default=jd),encoding="utf-8")
-print(f"Wrote {len(out)} RB/WR/TE players through Week {latest}.")
+<section class="panel tablebox"><h2>Waiver Watchlist</h2>
+<div class="note">Score is an opportunity signal, not a guarantee of future production. Click a column heading to sort.</div>
+<table><thead><tr>
+<th data-k="rank">RANK</th><th data-k="player">PLAYER</th><th data-k="team">TEAM</th><th data-k="pos">POS</th>
+<th data-k="score">SCORE</th><th data-k="tier">TIER</th><th data-k="snap_pct">SNAP %</th><th data-k="route_pct">ROUTE %</th>
+<th data-k="target_pct">TARGET %</th><th data-k="carry_pct">CARRY %</th><th data-k="air_pct">AIR %</th><th data-k="rz_looks">RZ LOOKS</th>
+<th>SIGNALS</th></tr></thead><tbody id="body"></tbody></table><div id="empty" class="empty" hidden>No players match these filters.</div>
+</section>
+<div class="warn">Route % will remain 0 until a reliable route-participation source is connected. V2.1 intentionally does not invent a route proxy.</div>
+</main>
+<script>
+let DATA={players:[]}, sortKey="score", sortDir=-1;
+const $=id=>document.getElementById(id);
+const pick=(o,...ks)=>{for(const k of ks)if(o&&o[k]!==undefined&&o[k]!==null)return o[k];return null}
+const pct=v=>`${Number(v||0).toFixed(1)}%`;
+function normalized(){
+  const raw=Array.isArray(DATA.players)?DATA.players:(Array.isArray(DATA.rows)?DATA.rows:[]);
+  return raw.map((p,i)=>({
+    rank:pick(p,"rank")??i+1, player:pick(p,"player","name","player_name")??"Unknown",
+    team:pick(p,"team")??"", pos:pick(p,"pos","position")??"",
+    score:Number(pick(p,"score","breakout_score")??0), tier:pick(p,"tier")??"Monitor",
+    snap_pct:Number(pick(p,"snap_pct","snap_share")??0), route_pct:Number(pick(p,"route_pct","route_share")??0),
+    target_pct:Number(pick(p,"target_pct","target_share")??0), carry_pct:Number(pick(p,"carry_pct","carry_share")??0),
+    air_pct:Number(pick(p,"air_pct","air_share")??0), rz_looks:Number(pick(p,"rz_looks","red_zone_looks")??0),
+    signals:Array.isArray(p.signals)?p.signals:[pick(p,"signal","signals")].filter(Boolean)
+  }));
+}
+function render(){
+  let a=normalized(), pos=$("pos").value, min=+$("min").value, q=$("search").value.toLowerCase().trim();
+  a=a.filter(p=>(pos==="All"||p.pos===pos)&&p.score>=min&&(!q||(p.player+" "+p.team).toLowerCase().includes(q)));
+  if($("strong").checked)a=a.filter(p=>p.signals.some(s=>!/needs monitoring/i.test(s)));
+  a.sort((x,y)=>{let A=x[sortKey],B=y[sortKey];if(typeof A==="string"){A=A.toLowerCase();B=String(B).toLowerCase()}return A<B?-sortDir:A>B?sortDir:0});
+  $("body").innerHTML=a.map(p=>`<tr><td>${p.rank}</td><td><b>${p.player}</b></td><td>${p.team}</td><td>${p.pos}</td>
+  <td class="score">${p.score.toFixed(1)}</td><td><b>${p.tier}</b></td><td>${pct(p.snap_pct)}</td><td>${pct(p.route_pct)}</td>
+  <td>${pct(p.target_pct)}</td><td>${pct(p.carry_pct)}</td><td>${pct(p.air_pct)}</td><td>${p.rz_looks.toFixed(1)}</td>
+  <td>${p.signals.map(s=>`<span class="chip">${s}</span>`).join(" ")}</td></tr>`).join("");
+  $("empty").hidden=a.length>0;
+}
+fetch("./data.json?ts="+Date.now()).then(r=>{if(!r.ok)throw Error("HTTP "+r.status);return r.json()}).then(d=>{
+ DATA=d;
+ const week=pick(d,"week","data_through_week","latest_week");
+ $("week").textContent=week!=null?"W"+week:"—";
+ const all=normalized(); $("tracked").textContent=all.length;
+ $("priority").textContent=all.filter(p=>p.tier==="Priority Add").length;
+ $("model").textContent=pick(d,"model","model_name")||"Usage+ V2.1";
+ const rawDate=pick(d,"generated_at_utc","generated_at","updated_at");
+ $("updated").textContent=rawDate?("Updated "+new Date(rawDate).toLocaleString()):"";
+ render();
+}).catch(e=>{$("updated").textContent="Data load error";$("empty").hidden=false;$("empty").textContent="Could not load data.json: "+e.message});
+["pos","min","search","strong"].forEach(id=>$(id).addEventListener(id==="search"?"input":"change",render));
+document.querySelectorAll("th[data-k]").forEach(th=>th.addEventListener("click",()=>{const k=th.dataset.k;if(sortKey===k)sortDir*=-1;else{sortKey=k;sortDir=(["player","team","pos","tier"].includes(k)?1:-1)}render()}));
+</script></body></html>
