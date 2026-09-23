@@ -1,248 +1,165 @@
-import json
+# Waiver Edge V2 — replacement update.py
 from pathlib import Path
-import pandas as pd
-import numpy as np
-
-SEASON = 2026
-MAX_ROSTERED_PCT = 60
-LOOKBACK = 3
-
-# nflreadpy is the maintained Python interface to nflverse.
-# The GitHub Action installs it before running this script.
+from datetime import datetime, timezone
+import json, numpy as np, pandas as pd
 import nflreadpy as nfl
 
-ROOT = Path(__file__).resolve().parent
-DOCS = ROOT / "docs"
-DOCS.mkdir(exist_ok=True)
+SEASON=2026
+DOCS=Path("docs"); DOCS.mkdir(exist_ok=True)
+POSITIONS={"RB","WR","TE"}
+WEIGHTS={0:.50,1:.30,2:.20}
 
-def safe_num(x):
-    try:
-        return float(x)
-    except Exception:
-        return 0.0
+def pdx(x): return x.to_pandas() if hasattr(x,"to_pandas") else pd.DataFrame(x)
+def n(s): return pd.to_numeric(s,errors="coerce").fillna(0)
+def c(df,*names,default=0):
+    for x in names:
+        if x in df.columns:return df[x]
+    return pd.Series(default,index=df.index)
+def div(a,b):
+    a,b=n(a),n(b)
+    return pd.Series(np.where(b>0,a/b,0),index=a.index)
+def normpct(s):
+    x=n(s).astype(float)
+    if len(x) and x.max()>1.5:x=x/100
+    return x.clip(0,1)
+def jd(o):
+    if isinstance(o,np.integer):return int(o)
+    if isinstance(o,np.floating):return float(o)
+    if isinstance(o,np.bool_):return bool(o)
+    if isinstance(o,(pd.Timestamp,datetime)):return o.isoformat()
+    if hasattr(o,"item"):return o.item()
+    return str(o)
 
-def first_existing(df, names, default=0):
-    for n in names:
-        if n in df.columns:
-            return n
-    df["_missing"] = default
-    return "_missing"
+print("Loading weekly player stats...")
+w=pdx(nfl.load_player_stats(SEASON,summary_level="week"))
+rename={}
+for target,opts in {
+ "player_id":["player_id","gsis_id"],"player_name":["player_display_name","player_name","name"],
+ "team":["recent_team","team","posteam"],"position":["position","position_group"],"week":["week"]
+}.items():
+    if target not in w:
+        for x in opts:
+            if x in w: rename[x]=target; break
+w=w.rename(columns=rename)
+need=["player_id","player_name","team","position","week"]
+miss=[x for x in need if x not in w]
+if miss: raise RuntimeError(f"Missing player-stat columns {miss}; got {list(w.columns)}")
+w["week"]=pd.to_numeric(w["week"],errors="coerce")
+w=w.dropna(subset=["week"]); w["week"]=w["week"].astype(int)
+w["position"]=w["position"].astype(str).str.upper()
+w=w[w.position.isin(POSITIONS)].copy()
+if w.empty: raise RuntimeError("No RB/WR/TE weekly stats found.")
+latest=int(w.week.max()); first=max(1,latest-2)
+w=w[w.week.between(first,latest)].copy()
 
-def zclip(series, lo=0, hi=100):
-    return series.clip(lo, hi)
+for out,names in {
+ "targets":("targets",),"carries":("carries","rushing_attempts"),"receptions":("receptions",),
+ "rec_yards":("receiving_yards",),"rush_yards":("rushing_yards",),
+ "rec_tds":("receiving_tds",),"rush_tds":("rushing_tds",),
+ "air_yards":("receiving_air_yards","air_yards")
+}.items(): w[out]=n(c(w,*names))
+w["half_ppr"]=w.receptions*.5+(w.rec_yards+w.rush_yards)*.1+(w.rec_tds+w.rush_tds)*6
+g=w.groupby(["team","week"],dropna=False)
+w["target_share"]=div(w.targets,g.targets.transform("sum"))
+w["carry_share"]=div(w.carries,g.carries.transform("sum"))
+w["air_share"]=div(w.air_yards,g.air_yards.transform("sum"))
 
-def weighted_recent(group, col):
-    """Latest week gets 60%, previous 25%, third 15%."""
-    g = group.sort_values("week", ascending=False).head(LOOKBACK)
-    if len(g) == 0:
-        return 0
-    weights = [0.60, 0.25, 0.15][:len(g)]
-    vals = pd.to_numeric(g[col], errors="coerce").fillna(0).tolist()
-    return sum(v*w for v,w in zip(vals, weights)) / sum(weights)
+print("Loading snap counts...")
+w["snap_share"]=0.0
+try:
+ s=pdx(nfl.load_snap_counts(SEASON))
+ sr={}
+ for target,opts in {"player_id":["player_id","pfr_player_id"],"player_name":["player","player_name"],"team":["team"],"week":["week"]}.items():
+    if target not in s:
+     for x in opts:
+      if x in s: sr[x]=target; break
+ s=s.rename(columns=sr)
+ sp=next((x for x in ["offense_pct","off_pct","offensive_snap_pct","offense_snap_pct"] if x in s),None)
+ if sp:
+  s["snap_new"]=normpct(s[sp])
+  keys=[]
+  if "player_id" in s:
+   overlap=set(w.player_id.dropna().astype(str))&set(s.player_id.dropna().astype(str))
+   if overlap:keys=["player_id","week"]
+  if not keys and all(x in s for x in ["player_name","team","week"]):keys=["player_name","team","week"]
+  if keys:
+   sm=s[keys+["snap_new"]].drop_duplicates(keys)
+   w=w.merge(sm,on=keys,how="left")
+   w["snap_share"]=n(w.snap_new); w=w.drop(columns=["snap_new"])
+except Exception as e: print("Snap warning:",e)
 
-def trend(group, col):
-    g = group.sort_values("week").tail(LOOKBACK)
-    if len(g) < 2:
-        return 0
-    a = safe_num(g[col].iloc[-1])
-    b = safe_num(g[col].iloc[:-1].mean())
-    # percentage-point change, scaled into a useful 0-100 contribution
-    return max(-25, min(25, (a-b)*2))
+print("Loading play-by-play for red-zone work...")
+w["rz_looks"]=0.0
+try:
+ p=pdx(nfl.load_pbp(SEASON)); p["week"]=pd.to_numeric(p["week"],errors="coerce")
+ p=p[p.week.between(first,latest)].copy()
+ p=p[n(c(p,"yardline_100",default=999))<=20]
+ parts=[]
+ if "rusher_player_id" in p:
+  x=p[p.rusher_player_id.notna()].groupby(["rusher_player_id","week"]).size().reset_index(name="rz_rush").rename(columns={"rusher_player_id":"player_id"}); parts.append(x)
+ if "receiver_player_id" in p:
+  x=p[p.receiver_player_id.notna()].groupby(["receiver_player_id","week"]).size().reset_index(name="rz_tgt").rename(columns={"receiver_player_id":"player_id"}); parts.append(x)
+ if parts:
+  rz=parts[0]
+  for x in parts[1:]:rz=rz.merge(x,on=["player_id","week"],how="outer")
+  rz["rz_new"]=n(c(rz,"rz_rush"))+n(c(rz,"rz_tgt"))
+  w=w.merge(rz[["player_id","week","rz_new"]],on=["player_id","week"],how="left")
+  w["rz_looks"]=n(w.rz_new); w=w.drop(columns=["rz_new"])
+except Exception as e: print("RZ warning:",e)
 
-print("Loading nflverse weekly player stats...")
-weekly = nfl.load_player_stats(SEASON).to_pandas()
+# Public nflverse feeds used here do not provide reliable route participation.
+# V2 leaves it blank/zero rather than inventing a proxy.
+w["route_share"]=0.0
+w["ago"]=latest-w.week; w["wt"]=w.ago.map(WEIGHTS).fillna(0)
+metrics=["snap_share","route_share","target_share","carry_share","air_share","rz_looks","half_ppr"]
 
-print("Loading nflverse snap counts...")
-snaps = nfl.load_snap_counts(SEASON).to_pandas()
+rows=[]
+for pid,z in w.groupby("player_id",dropna=False):
+ z=z.sort_values("week"); den=z.wt.sum() or 1
+ r={"player_id":pid,"player":z.player_name.iloc[-1],"team":z.team.iloc[-1],"pos":z.position.iloc[-1]}
+ for m in metrics:r[m]=float((z[m]*z.wt).sum()/den)
+ a=z.iloc[-1]; b=z.iloc[-2] if len(z)>1 else a
+ for m in ["snap_share","target_share","carry_share"]:r[m+"_trend"]=float(a[m]-b[m])
+ rows.append(r)
+P=pd.DataFrame(rows)
 
-# Normalize common identifiers.
-weekly = weekly.copy()
-snaps = snaps.copy()
+def pr(x):return x.rank(pct=True,method="average").fillna(0)
+P["score"]=0.0
+for pos in ["RB","WR","TE"]:
+ ix=P.pos.eq(pos); q=P.loc[ix]
+ if q.empty:continue
+ if pos=="RB": sc=22*pr(q.snap_share)+28*pr(q.carry_share)+16*pr(q.target_share)+14*pr(q.rz_looks)+10*pr(q.half_ppr)+10*pr(q.carry_share_trend+q.target_share_trend)
+ elif pos=="WR": sc=24*pr(q.snap_share)+28*pr(q.target_share)+20*pr(q.air_share)+10*pr(q.rz_looks)+8*pr(q.half_ppr)+10*pr(q.target_share_trend+q.snap_share_trend)
+ else: sc=30*pr(q.snap_share)+30*pr(q.target_share)+15*pr(q.rz_looks)+10*pr(q.half_ppr)+15*pr(q.target_share_trend+q.snap_share_trend)
+ P.loc[ix,"score"]=sc.values
+P.score=P.score.clip(0,100).round(1)
+def tier(x):
+ return "Priority Add" if x>=82 else "Strong Add" if x>=72 else "Stash" if x>=60 else "Monitor"
+def sig(r):
+ a=[]
+ if r.snap_share>=.70:a.append("high snap role")
+ if r.snap_share_trend>=.10:a.append("snap share rising")
+ if r.target_share>=.18:a.append("strong target share")
+ if r.target_share_trend>=.05:a.append("targets rising")
+ if r.pos=="RB" and r.carry_share>=.45:a.append("major backfield share")
+ if r.carry_share_trend>=.10:a.append("carry share rising")
+ if r.air_share>=.25:a.append("air-yard role")
+ if r.rz_looks>=2:a.append("red-zone role")
+ return a[:3] or ["usage needs monitoring"]
+P["tier"]=P.score.map(tier); P["signals"]=P.apply(sig,axis=1)
+P=P[P.score>=35].sort_values(["score","target_share","carry_share"],ascending=False)
 
-for df in (weekly, snaps):
-    for c in ["week", "season"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+out=[]
+for rank,(_,r) in enumerate(P.iterrows(),1):
+ out.append({"rank":rank,"player":str(r.player),"team":str(r.team),"pos":str(r.pos),
+ "score":float(r.score),"tier":str(r.tier),"snap_pct":round(float(r.snap_share)*100,1),
+ "route_pct":round(float(r.route_share)*100,1),"target_pct":round(float(r.target_share)*100,1),
+ "carry_pct":round(float(r.carry_share)*100,1),"air_pct":round(float(r.air_share)*100,1),
+ "rz_looks":round(float(r.rz_looks),1),"half_ppr":round(float(r.half_ppr),1),
+ "signals":r.signals,"rostered_pct":None,"available_leagues":[]})
 
-# Restrict to completed regular-season weeks.
-if "season_type" in weekly.columns:
-    weekly = weekly[weekly.season_type.eq("REG")]
-if "season_type" in snaps.columns:
-    snaps = snaps[snaps.season_type.eq("REG")]
-
-latest_week = int(weekly["week"].max())
-weeks = sorted([w for w in weekly["week"].dropna().unique() if w <= latest_week])[-LOOKBACK:]
-weekly = weekly[weekly.week.isin(weeks)].copy()
-snaps = snaps[snaps.week.isin(weeks)].copy()
-
-# Core player stat fields.
-targets_col = first_existing(weekly, ["targets"])
-carries_col = first_existing(weekly, ["carries", "rushing_attempts"])
-air_col = first_existing(weekly, ["receiving_air_yards", "rec_air_yards"])
-ppr_col = first_existing(weekly, ["fantasy_points_ppr", "fantasy_points"])
-
-# Team denominators.
-for c in [targets_col, carries_col, air_col]:
-    weekly[c] = pd.to_numeric(weekly[c], errors="coerce").fillna(0)
-
-weekly["target_share_calc"] = weekly[targets_col] / weekly.groupby(["week","team"])[targets_col].transform("sum").replace(0, np.nan) * 100
-weekly["carry_share_calc"] = weekly[carries_col] / weekly.groupby(["week","team"])[carries_col].transform("sum").replace(0, np.nan) * 100
-weekly["air_share_calc"] = weekly[air_col] / weekly.groupby(["week","team"])[air_col].transform("sum").replace(0, np.nan) * 100
-
-# Snap data column discovery. nflverse/PFR naming can evolve, so use fallbacks.
-snap_col = first_existing(snaps, ["offense_snaps", "offensive_snaps", "offense_snap"])
-team_snap_col = first_existing(snaps, ["offense_snaps_team", "team_offense_snaps"])
-
-# If team snap denominator is not directly supplied, calculate it from max player snaps per team/week.
-if team_snap_col == "_missing":
-    team_max = snaps.groupby(["week","team"])[snap_col].transform("max")
-    snaps["snap_share_calc"] = pd.to_numeric(snaps[snap_col], errors="coerce").fillna(0) / team_max.replace(0,np.nan) * 100
-else:
-    snaps["snap_share_calc"] = pd.to_numeric(snaps[snap_col], errors="coerce").fillna(0) / pd.to_numeric(snaps[team_snap_col], errors="coerce").replace(0,np.nan) * 100
-
-# Merge by name/team/week because source ID fields can differ across feeds.
-name_w = first_existing(weekly, ["player_name", "player_display_name"])
-name_s = first_existing(snaps, ["player", "player_name", "player_display_name"])
-team_w = first_existing(weekly, ["team"])
-team_s = first_existing(snaps, ["team"])
-
-snap_keep = snaps[[c for c in ["week", team_s, name_s, "snap_share_calc"] if c in snaps.columns]].copy()
-snap_keep = snap_keep.rename(columns={team_s:"team", name_s:"player_name"})
-weekly["player_name"] = weekly[name_w].astype(str)
-weekly["team"] = weekly[team_w].astype(str)
-weekly = weekly.merge(snap_keep, on=["week","team","player_name"], how="left")
-
-weekly["snap_share_calc"] = pd.to_numeric(weekly["snap_share_calc"], errors="coerce").fillna(0)
-weekly["target_share_calc"] = weekly["target_share_calc"].fillna(0)
-weekly["carry_share_calc"] = weekly["carry_share_calc"].fillna(0)
-weekly["air_share_calc"] = weekly["air_share_calc"].fillna(0)
-
-# Approximate route participation when available.
-route_col = first_existing(weekly, ["routes_run", "route_participation"])
-if route_col != "_missing":
-    weekly["route_calc"] = pd.to_numeric(weekly[route_col], errors="coerce").fillna(0)
-    # If route participation is already a percentage, retain it; otherwise
-    # use routes / team pass attempts as a proxy.
-    if weekly["route_calc"].max() <= 100:
-        pass
-    else:
-        pa = first_existing(weekly, ["attempts", "passing_attempts", "pass_attempts"])
-        weekly["route_calc"] = weekly["route_calc"] / weekly.groupby(["week","team"])[pa].transform("sum").replace(0,np.nan) * 100
-else:
-    weekly["route_calc"] = weekly["snap_share_calc"] * 0.90
-
-# Red-zone looks from available weekly fields; if unavailable, leave at 0.
-rz_candidates = [c for c in ["red_zone_targets", "redzone_targets", "rz_targets", "red_zone_opportunities"] if c in weekly.columns]
-if rz_candidates:
-    weekly["rz_calc"] = pd.to_numeric(weekly[rz_candidates[0]], errors="coerce").fillna(0)
-else:
-    weekly["rz_calc"] = 0
-
-# Position normalization.
-pos_col = first_existing(weekly, ["position"])
-weekly["pos"] = weekly[pos_col].astype(str).str.upper()
-weekly["pos"] = weekly["pos"].replace({"FB":"RB"})
-
-# Keep fantasy-relevant skill positions.
-weekly = weekly[weekly.pos.isin(["RB","WR","TE","QB"])].copy()
-
-# Aggregate per player.
-records = []
-for (player, team, pos), g in weekly.groupby(["player_name","team","pos"]):
-    latest = g.sort_values("week").iloc[-1]
-    r = {
-        "player": player,
-        "team": team,
-        "pos": pos,
-        "week": int(latest_week),
-        "snap": weighted_recent(g, "snap_share_calc"),
-        "target": weighted_recent(g, "target_share_calc"),
-        "carry": weighted_recent(g, "carry_share_calc"),
-        "air": weighted_recent(g, "air_share_calc"),
-        "route": weighted_recent(g, "route_calc"),
-        "rz": weighted_recent(g, "rz_calc"),
-        "ppr": weighted_recent(g, ppr_col) if ppr_col in g.columns else 0,
-        "snap_trend": trend(g, "snap_share_calc"),
-        "target_trend": trend(g, "target_share_calc"),
-        "carry_trend": trend(g, "carry_share_calc"),
-        "latest_snap": safe_num(latest["snap_share_calc"]),
-        "latest_target": safe_num(latest["target_share_calc"]),
-        "latest_rz": safe_num(latest["rz_calc"]),
-    }
-    records.append(r)
-
-df = pd.DataFrame(records)
-
-def score_row(r):
-    p = r.pos.lower()
-    if p == "wr":
-        score = (
-            r.snap*0.20 + r.route*0.15 + r.target*0.25 +
-            r.air*0.10 + min(r.rz*5,100)*0.15 +
-            max(0,min(100,50+r.snap_trend*2+r.target_trend*2))*0.10 +
-            min(max(r.ppr*4,0),100)*0.05
-        )
-    elif p == "rb":
-        score = (
-            r.snap*0.20 + r.route*0.10 + r.carry*0.20 +
-            r.target*0.10 + min(r.rz*5,100)*0.20 +
-            max(0,min(100,50+r.snap_trend*2+r.carry_trend*2))*0.15 +
-            min(max(r.ppr*4,0),100)*0.05
-        )
-    elif p == "te":
-        score = (
-            r.snap*0.15 + r.route*0.25 + r.target*0.25 +
-            r.air*0.05 + min(r.rz*5,100)*0.20 +
-            max(0,min(100,50+r.target_trend*2))*0.05 +
-            min(max(r.ppr*4,0),100)*0.05
-        )
-    else:
-        score = r.snap*0.20 + min(r.rz*5,100)*0.20 + max(0,min(100,50+r.snap_trend*2))*0.20 + min(max(r.ppr*4,0),100)*0.40
-    return round(max(0,min(100,score)),1)
-
-df["breakout_score"] = df.apply(score_row, axis=1)
-
-def tier(s):
-    if s >= 78: return "Priority Add"
-    if s >= 68: return "Strong Add"
-    if s >= 58: return "Speculative Add"
-    if s >= 48: return "Deep-League Watch"
-    return "Monitor"
-
-df["tier"] = df.breakout_score.map(tier)
-
-def reasons(r):
-    out=[]
-    if r.latest_snap >= 70: out.append("70%+ snaps")
-    if r.latest_target >= 18: out.append("18%+ target share")
-    if r.latest_rz >= 2: out.append("2+ RZ looks")
-    if r.snap_trend >= 5: out.append("snap share rising")
-    if r.target_trend >= 5: out.append("target share rising")
-    if r.carry_trend >= 5: out.append("carry share rising")
-    if not out: out.append("usage needs monitoring")
-    return out[:4]
-
-df["signals"] = df.apply(reasons, axis=1)
-
-# We cannot reliably infer league roster percentages from nflverse alone.
-# Keep all players and let the UI apply the user's rostered-percent threshold
-# once an ownership feed is connected.
-df = df.sort_values(["pos","breakout_score"], ascending=[True,False])
-
-payload = {
-    "generated_at_utc": pd.Timestamp.utcnow().isoformat(),
-    "season": SEASON,
-    "through_week": latest_week,
-    "weeks_used": weeks,
-    "ownership_source": "Not connected — use the dashboard threshold or add an ownership API.",
-    "players": df.to_dict(orient="records")
-}
-
-(DOCS/"data.json").write_text(
-    json.dumps(
-        payload,
-        allow_nan=False,
-        indent=2,
-        default=lambda o: o.item() if hasattr(o, "item") else str(o)
-    )
-)
+payload={"season":SEASON,"week":latest,"generated_at_utc":datetime.now(timezone.utc).isoformat(),
+"model":"Usage+ V2","players":out,"meta":{"positions":["RB","WR","TE"],"lookback_weeks":3,
+"note":"Yahoo availability not connected yet. Route participation is intentionally not fabricated."}}
+(DOCS/"data.json").write_text(json.dumps(payload,allow_nan=False,indent=2,default=jd),encoding="utf-8")
+print(f"Wrote {len(out)} RB/WR/TE players through Week {latest}.")
