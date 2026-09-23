@@ -25,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy nflreadpy
+          pip install pandas numpy nflreadpy pyarrow
 
       - name: Update waiver data
         run: python update.py
