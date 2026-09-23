@@ -103,8 +103,13 @@ jobs:
                   result = json.loads(response.read())
 
           except urllib.error.HTTPError as e:
+              body = e.read().decode("utf-8", errors="replace")
+              
               print("FANTASY API FAILED")
               print("Yahoo HTTP status:", e.code)
+              print("Yahoo Fantasy response:")
+              print(body)
+
               raise
 
           print("Yahoo Fantasy API: SUCCESS")
