@@ -159,7 +159,7 @@ for rank,(_,r) in enumerate(P.iterrows(),1):
  "signals":r.signals,"rostered_pct":None,"available_leagues":[]})
 
 payload={"season":SEASON,"week":latest,"generated_at_utc":datetime.now(timezone.utc).isoformat(),
-"model":"Usage+ V2","players":out,"meta":{"positions":["RB","WR","TE"],"lookback_weeks":3,
-"note":"Yahoo availability not connected yet. Route participation is intentionally not fabricated."}}
+"model":"Usage+ V2.1","players":out,"meta":{"positions":["RB","WR","TE"],"lookback_weeks":3,
+"note":"Yahoo availability not connected yet. Route participation is intentionally not fabricated. Front end: V2.1."}}
 (DOCS/"data.json").write_text(json.dumps(payload,allow_nan=False,indent=2,default=jd),encoding="utf-8")
 print(f"Wrote {len(out)} RB/WR/TE players through Week {latest}.")
