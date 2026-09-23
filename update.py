@@ -238,5 +238,11 @@ payload = {
     "players": df.to_dict(orient="records")
 }
 
-(DOCS/"data.json").write_text(json.dumps(payload, allow_nan=False, indent=2))
-print(f"Wrote {len(df)} player records through Week {latest_week}.")
+(DOCS/"data.json").write_text(
+    json.dumps(
+        payload,
+        allow_nan=False,
+        indent=2,
+        default=lambda o: o.item() if hasattr(o, "item") else str(o)
+    )
+)
